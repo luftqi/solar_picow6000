@@ -52,8 +52,7 @@ def wifi_connect(ssid,password):
 time.sleep(0.5)
 try:
     wifi_connect(ssid,password)
-    wdt = machine.WDT(timeout=8000)
-    wdt.feed()
+    
 except OSError as e: 
     print(e)
     machine.reset()    
