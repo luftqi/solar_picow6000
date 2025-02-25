@@ -1,4 +1,5 @@
 
+
 import network
 import socket
 import urequests
@@ -22,9 +23,7 @@ wlan.active(True)
 ssid = 'LUFTQI' 
 password = '82767419'
 
-firmware_url = f"https://github.com/luftqi/solar_picow/"
-ota_updater = OTAUpdater(firmware_url, "main.py")
-ota_updater.download_and_install_update_if_available()
+
 
 #wifi connect
 def wifi_connect(ssid,password):    
@@ -52,13 +51,17 @@ def wifi_connect(ssid,password):
 time.sleep(0.5)
 try:
     wifi_connect(ssid,password)
-    
+    print("coonect")   
 except OSError as e: 
     print(e)
     machine.reset()    
 
 led = Pin(25, Pin.OUT)
+firmware_url = f"https://github.com/luftqi/solar_picow/refs/heads/main/"
+ota_updater = OTAUpdater(firmware_url, "main.py")
+ota_updater.download_and_install_update_if_available()
 
 while True:
   led.value(1)   # LED亮
+  led.value(0)
 
