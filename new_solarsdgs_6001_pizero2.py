@@ -16,7 +16,7 @@ nceid_token = "Basic Z3JheUBzb2xhcnNkZ3MuY29tOjk2NzYyMzY0"
 
 # --- 全域變數 ---
 factor_a, factor_p = 1.0, 1.0
-pizero2_on, pizero2_off = "30", "40"
+pizero2_on, pizero2_off = "30", "50"
 message, message_check = [], []
 
 # --- MQTT 設定 ---
@@ -30,38 +30,73 @@ username = f'solarsdgs{iot}'
 password = '82767419'
 
 # --- 函數定義 ---
+# [最終修正] 修改 locator 函數，使其能精準匹配指定的 nceid
 def locator():
+    """
+    透過 1NCE API 獲取指定 nceid 設備的最新 GPS 位置。
+    """
     print("正在透過 1NCE API 獲取 GPS 位置...")
+    # --- 第一步：獲取 Access Token ---
     url_token = "https://api.1nce.com/management-api/oauth/token"
     payload = {"grant_type": "client_credentials"}
     headers_token = {"accept": "application/json", "content-type": "application/json", "authorization": nceid_token}
+    access_token = None
     try:
         token_response = requests.post(url_token, json=payload, headers=headers_token, timeout=10)
         token_response.raise_for_status()
         access_token = token_response.json().get('access_token')
-        if not access_token: return None
+        if not access_token:
+            print("從 1NCE 獲取 Access Token 失敗。")
+            return None
+        print("成功獲取 1NCE Access Token。")
     except requests.exceptions.RequestException as e:
         print(f"請求 1NCE Access Token 時發生網路錯誤: {e}")
         return None
 
-    url_location = "https://api.1nce.com/management-api/v1/locate/positions/latest?page=1&per_page=1"
+    # --- 第二步：使用 Access Token 獲取最新位置列表 ---
+    if not access_token:
+        return None
+
+    # 此端點獲取帳戶下最新的位置事件
+    url_location = "https://api.1nce.com/management-api/v1/locate/positions/latest?page=1&per_page=10" # 稍微多獲取幾筆以防萬一
     headers_location = {"accept": "application/json", "authorization": f"Bearer {access_token}"}
+    
     try:
         gps_response = requests.get(url_location, headers=headers_location, timeout=15)
         gps_response.raise_for_status()
         data = gps_response.json()
-        if data and data.get('items'):
-            coordinates = data['items'][0].get('coordinates')
-            if coordinates and 'latitude' in coordinates and 'longitude' in coordinates:
-                location_str = f"{coordinates['latitude']},{coordinates['longitude']}"
-                print(f"成功獲取 1NCE 位置: {location_str}")
-                return location_str
+
+        # [最終修正] 遍歷返回的列表，找到與 nceid 匹配的設備
+        positions_list = data.get('coordinates')
+        if positions_list:
+            for position_data in positions_list:
+                if position_data.get('deviceId') == nceid:
+                    print(f"在 API 回應中找到匹配的設備 ID: {nceid}")
+                    coord_array = position_data.get('coordinate')
+                    if coord_array and len(coord_array) == 2:
+                        lon = coord_array[0]
+                        lat = coord_array[1]
+                        location_str = f"{lat},{lon}"
+                        print(f"成功解析 1NCE 位置: {location_str}")
+                        return location_str
+                    else:
+                        # 找到了設備但沒有座標
+                        break # 不用再找了
+            
+            # 如果迴圈結束都沒找到匹配的設備
+            print(f"解析錯誤：在 API 回應中未找到設備 ID 為 {nceid} 的位置資訊。")
+            return None
+        else:
+            print("解析錯誤：回應中未找到 'coordinates' 列表或列表為空。")
+            return None
+            
+    except requests.exceptions.RequestException as e:
+        print(f"請求 1NCE 位置時發生網路錯誤: {e}")
         return None
-    except (requests.exceptions.RequestException, IndexError, KeyError) as e:
-        print(f"請求或解析 1NCE 位置時出錯: {e}")
+    except (IndexError, KeyError, TypeError) as e:
+        print(f"解析 1NCE 位置資料時出錯: {e}")
         return None
 
-# 函數定義現在只需要3個參數
 def power_read_and_send(message_list, client, location):
     pggg, paaa, pppp, pgaa, pgpp = [], [], [], [], []
 
@@ -75,8 +110,8 @@ def power_read_and_send(message_list, client, location):
             pg_val, pa_val, pp_val = map(int, parts[1:])
             pa_calibrated = int(pa_val * factor_a)
             pp_calibrated = int(pp_val * factor_p)
-            pga_efficiency = (pa_val - pg_val) / pg_val if pg_val != 0 else 0
-            pgp_efficiency = (pp_val - pg_val) / pg_val if pg_val != 0 else 0
+            pga_efficiency = (pa_val - pg_val)*100 / pg_val if pg_val != 0 else 0
+            pgp_efficiency = (pp_val - pg_val)*100 / pg_val if pg_val != 0 else 0
             pggg.append([time_stamp_utc, pg_val])
             paaa.append([time_stamp_utc, pa_calibrated])
             pppp.append([time_stamp_utc, pp_calibrated])
@@ -172,7 +207,7 @@ default_location = "24.960938,121.247177"
 location = locator()
 if location is None:
     location = default_location
-    print("無法從 1NCE 獲取位置，將使用預設值。")
+    print("無法從 1NCE 獲取準確位置，將使用預設值。")
 
 # --- 主迴圈 ---
 while True:
@@ -190,7 +225,6 @@ while True:
             except (IndexError, ValueError): continue
         print("資料庫儲存完畢。")
 
-        # [最終修正] 呼叫函數時，移除多餘的 message_check 參數
         power_read_and_send(message, client, location)
         
         message_check = list(message)
