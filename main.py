@@ -8,7 +8,6 @@ import gc
 import machine
 import os
 import ina226
-import ubinascii # 保留，以備未來可能需要
 from simple import MQTTClient
 from machine import Pin, I2C, Timer
 
@@ -83,15 +82,7 @@ def wifi_connect(ssid, password):
 
 def connect_mqtt():
     try:
-        # [最終完美方案] 採納您的建議，使用 "固定ID + 隨機後綴" 的方式
-        # 獲取當前時間戳作為隨機後綴
-        random_suffix = str(time.time())
-        # 組合基礎 ID 和隨機後綴
-        # 將字串轉換為位元組 (bytes)
-        client_id = b'solarsdgs' + iot.encode() + b'-' + random_suffix.encode()
-        print(f"使用時間戳隨機 Client ID: {client_id.decode()}")
-        
-        client = MQTTClient(client_id=client_id, server='10.42.0.1', user=b'solarsdgs'+iot, password=b'82767419', keepalive=7200)
+        client = MQTTClient(client_id=b'solarsdgs'+iot+'_1', server='10.42.0.1', user=b'solarsdgs'+iot, password=b'82767419', keepalive=7200)
         client.connect()
         print('成功連接到 MQTT Broker')
         return client
@@ -127,17 +118,18 @@ try:
     with open("pizero2on.txt", "r") as f1: pizero2_on = int(f1.read())
     with open("pizero2off.txt", "r") as f2: pizero2_off = int(f2.read())
 except (OSError, ValueError):
-    pizero2_on, pizero2_off = 30, 40
+    pizero2_on, pizero2_off = 30, 50
 
 reset_hour, reset_minute = 12, 10
 sleep_hour, sleep_minute = 19, 0
-sleep_duration_ms = 11 * 3600 * 1000 
+sleep_duration_ms = 11 * 3600 * 1000 # 11 小時的毫秒數
 
 timer = Timer()
 timer.init(freq=1, mode=Timer.PERIODIC, callback=lambda t: led.toggle())
 
 # 啟動期邏輯
 intervals = wifi_wait_time // 15
+print(f"開始 {wifi_wait_time} 秒的啟動等待期...")
 for i in range(intervals):
     wdt.feed()
     pg, pa, pp = power_read()
@@ -160,7 +152,6 @@ client.subscribe(b'pico/ack')
 print("已訂閱主題: pizero2onoff, pico/ack")
 
 # --- 主迴圈 ---
-client = None # 在主迴圈開始前，確保 client 變數存在
 while True:
     wdt.feed()
     loop_start_time = time.time()
@@ -169,25 +160,35 @@ while True:
     current_hour = current_time[3]
     current_minute = current_time[4]
 
+    # [夜間休眠功能] 使用 Deepsleep 低功耗模式
     if current_hour == sleep_hour and current_minute == sleep_minute:
-        print(f"到達夜間休眠時間，準備進入深度睡眠...")
-        pin_6.off()
+        print("="*40)
+        print(f"到達夜間休眠時間 ({sleep_hour}:{sleep_minute:02d})，準備進入深度睡眠...")
+        print("="*40)
+        
+        # 步驟 1: 關閉周邊硬體，確保進入 Deepsleep 前的狀態穩定
+        pin_6.off() # 關閉 Pi Zero
         timer.deinit()
         led.off()
-        try: client.disconnect()
-        except: pass
-        if wlan.isconnected(): wlan.disconnect(); wlan.active(False)
-        print(f"系統將進入 Deepsleep {sleep_duration_ms // 1000} 秒...")
+        try:
+            client.disconnect()
+            print("MQTT 已離線。")
+        except:
+            print("MQTT 無法離線 (可能已斷開)。")
+            pass
+        if wlan.isconnected():
+            wlan.disconnect()
+            wlan.active(False)
+            print("Wi-Fi 已關閉。")
+
+        # 步驟 2: 執行 Deepsleep
+        # 不需要事先禁用看門狗，deepsleep 本身就是一種計畫性的重啟
+        print(f"系統將進入 Deepsleep {sleep_duration_ms // 1000} 秒 ({sleep_duration_ms // 3600000}小時)...")
+        print("喚醒後將自動完全重啟。")
         machine.deepsleep(sleep_duration_ms)
 
-    if wlan.isconnected() and client is None:
-        print("偵測到 MQTT 未連線，正在嘗試重新連接...")
-        client = connect_mqtt()
-        if client:
-             client.set_callback(my_callback)
-             client.subscribe(b'pizero2onoff')
-             client.subscribe(b'pico/ack')
 
+    # ------ 日間工作邏輯 ------
     print("="*40)
     
     pg, pa, pp = power_read()
@@ -220,18 +221,10 @@ while True:
                     if not ack_received: print("警告：未收到 ACK 確認，數據將保留重試。")
                 except Exception as e:
                     print(f"MQTT 發布失敗: {e}。數據將保留。")
-                    try: client.disconnect()
-                    except: pass
-                    client = None 
-                    print("連線已重設，將在下一輪嘗試重新連接 MQTT。")
     try:
         if client: client.check_msg()
     except Exception as e:
         print(f"檢查MQTT訊息時出錯: {e}")
-        try: client.disconnect()
-        except: pass
-        client = None
-        print("連線已重設，將在下一輪嘗試重新連接 MQTT。")
 
     if current_hour == reset_hour and current_minute == reset_minute:
         disable_wdt()
@@ -240,7 +233,7 @@ while True:
         machine.reset()
 
     work_duration = time.time() - loop_start_time
-    sleep_for = 15 - work_duration
+    sleep_for = 33 - work_duration
     if sleep_for > 0:
         for _ in range(int(sleep_for)):
             wdt.feed()
