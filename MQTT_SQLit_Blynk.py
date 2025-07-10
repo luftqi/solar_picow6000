@@ -10,9 +10,11 @@ import sys
 from os import system
 
 # --- 設定 ---
+# [OTA] 版本號和 GitHub Repo 的設定
 CURRENT_VERSION = 2.0 
+# 請將下面的連結換成您自己 GitHub Repo 中的 "Raw" 連結
 VERSION_URL = "https://raw.githubusercontent.com/luftqi/solar_picow6000/main/pizero_version.txt"
-SCRIPT_URL = "https://raw.githubusercontent.com/luftqi/solar_picow6000/main/solarsdgs_6000_pizero2.py"
+SCRIPT_URL = "https://raw.githubusercontent.com/luftqi/solar_picow6000/main/MQTT_SQLit_Blynk.py"
 
 iot = '6000'
 blynk_token = 'vIrmXGCdWURWrX-FFEsUoDTFNXPmyiVM'
@@ -79,7 +81,9 @@ def locator():
         token_response.raise_for_status()
         access_token = token_response.json().get('access_token')
         if not access_token: return None
-    except: return None
+        print("成功獲取 1NCE Access Token。")
+    except:
+        return None
     url_location = "https://api.1nce.com/management-api/v1/locate/positions/latest?page=1&per_page=10"
     headers_location = {"accept": "application/json", "authorization": f"Bearer {access_token}"}
     try:
@@ -93,9 +97,10 @@ def locator():
                     coord_array = position_data.get('coordinate')
                     if coord_array and len(coord_array) == 2:
                         return f"{coord_array[1]},{coord_array[0]}" # 緯度,經度
-            return None # 列表中沒有找到匹配的 deviceId
-        return None # 回應中沒有 'coordinates' 列表
-    except: return None
+            return None
+        return None
+    except:
+        return None
 
 def power_read_and_send(message_list, client, location):
     """解析數據並上傳到 Blynk，回傳是否成功"""
@@ -109,24 +114,20 @@ def power_read_and_send(message_list, client, location):
             localtime = time.strptime(timestruct ,'%Y-%m-%d %H:%M:%S')
             time_stamp_utc = int(time.mktime(localtime))*1000
             pg_val, pa_val, pp_val = map(int, parts[1:])
-            pa_calibrated = int(pa_val * factor_a)
-            pp_calibrated = int(pp_val * factor_p)
+            pa_calibrated = int(pa_val * factor_a); pp_calibrated = int(pp_val * factor_p)
             pga_efficiency = (pa_val - pg_val)*100 / pg_val if pg_val != 0 else 0
             pgp_efficiency = (pp_val - pg_val)*100 / pg_val if pg_val != 0 else 0
-            pggg.append([time_stamp_utc, pg_val])
-            paaa.append([time_stamp_utc, pa_calibrated])
-            pppp.append([time_stamp_utc, pp_calibrated])
-            pgaa.append([time_stamp_utc, pga_efficiency])
+            pggg.append([time_stamp_utc, pg_val]); paaa.append([time_stamp_utc, pa_calibrated])
+            pppp.append([time_stamp_utc, pp_calibrated]); pgaa.append([time_stamp_utc, pga_efficiency])
             pgpp.append([time_stamp_utc, pgp_efficiency])
         except: continue
     if not pggg: return True
 
     if len(pggg) == 1:
         try:
-            blynk.virtual_write(4, pggg[0][1]); blynk.virtual_write(5, paaa[0][1])
-            blynk.virtual_write(6, pppp[0][1]); blynk.virtual_write(7, pgaa[0][1])
-            blynk.virtual_write(8, pgpp[0][1])
-        except Exception as e: print(f"Blynk 單筆上傳時發生錯誤: {e}"); all_uploads_successful = False
+            blynk.virtual_write(4, pggg[0][1]); blynk.virtual_write(5, paaa[0][1]); blynk.virtual_write(6, pppp[0][1])
+            blynk.virtual_write(7, pgaa[0][1]); blynk.virtual_write(8, pgpp[0][1])
+        except Exception as e: all_uploads_successful = False
     elif len(pggg) > 1:
         headers = {'Content-type': 'application/json'}
         base_url = f'https://blynk.cloud/external/api/batch/update?token={blynk_token}'
@@ -178,7 +179,8 @@ def get_existing_timestamps(c):
 # --- Blynk 設定 ---
 try:
     blynk = BlynkLib.Blynk(blynk_token)
-except Exception as e: system('reboot')
+except Exception as e:
+    system('reboot')
 
 @blynk.on("V0")
 def v0_write_handler(value): global factor_a; factor_a = float(value[0])
@@ -203,17 +205,23 @@ if location is None: location = default_location
 
 # --- 主迴圈 ---
 while True:
-    client.loop_start(); subscribe(client); blynk.run()
+    client.loop_start()
+    subscribe(client)
+    blynk.run()
 
+    # [最終修正] 只有在收到新訊息時才觸發處理流程
     if message and message != message_check:
-        print(f"偵測到 {len(message)} 筆數據，開始進行去重處理...")
+        print(f"\n偵測到新訊息 (包含 {len(message)} 筆數據)，開始處理...")
+        
         new_data_to_process = []
         new_data_for_db = []
         
         try:
+            # 1. 從資料庫中一次性讀取所有已存在的時間戳
             with sqlite3.connect(db_name) as conn:
                 existing_timestamps = get_existing_timestamps(conn.cursor())
             
+            # 2. 過濾數據，只保留全新的數據
             for data_string in message:
                 timestamp = data_string.split('/')[0]
                 if timestamp not in existing_timestamps:
@@ -221,25 +229,38 @@ while True:
                     sql_data = data_string.split('/')
                     new_data_for_db.append((sql_data[0], location, int(sql_data[1]), int(sql_data[2]), int(sql_data[3])))
 
+            # 情況 A: 有全新的數據需要處理
             if new_data_to_process:
                 print(f"去重後，有 {len(new_data_to_process)} 筆全新數據需要處理。")
                 insert_database_batch(new_data_for_db)
                 upload_successful = power_read_and_send(new_data_to_process, client, location)
+                
                 if upload_successful:
                     print("Blynk 上傳成功，已發送 ACK。")
                     client.publish(topic_ack, "OK")
+                    # 將原始 message 標記為已處理
+                    message_check = list(message) 
                 else:
                     print("Blynk 上傳失敗，未發送 ACK，數據將在下一輪重試。")
+            
+            # 情況 B: 收到的全是舊數據
             else:
                 print("收到的均為重複數據，直接發送 ACK 以協助 Pico 清除暫存。")
                 client.publish(topic_ack, "OK")
+                # 即使是重複數據，處理完也要更新 message_check
+                message_check = list(message)
             
-            # 無論處理結果如何，都將 message 標記為已檢查
-            message_check = list(message)
             # 發送最新的 on/off 時間
             client.publish(topic_pub, f"{pizero2_on}_{pizero2_off}")
 
         except Exception as e:
             print(f"數據處理主流程發生嚴重錯誤: {e}")
+            # 發生未知錯誤時，不更新 message_check，等待下次重試
+    
+    else:
+        # 只有在 message 和 message_check 相同時，才印出無新數據
+        if message == message_check:
+            print("無新數據。")
 
-    client.loop_stop(); time.sleep(5)
+    client.loop_stop()
+    time.sleep(5)
