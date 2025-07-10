@@ -6,9 +6,14 @@ import json
 import sqlite3
 import requests
 import os
+import sys
 from os import system
 
 # --- 設定 ---
+CURRENT_VERSION = 2.0 
+VERSION_URL = "https://raw.githubusercontent.com/luftqi/solar_picow6000/main/pizero_version.txt"
+SCRIPT_URL = "https://raw.githubusercontent.com/luftqi/solar_picow6000/main/solarsdgs_6000_pizero2.py"
+
 iot = '6000'
 blynk_token = 'vIrmXGCdWURWrX-FFEsUoDTFNXPmyiVM'
 nceid = '8988228066614762251'
@@ -30,13 +35,41 @@ username = f'solarsdgs{iot}'
 password = '82767419'
 
 # --- 函數定義 ---
-# [最終修正] 修改 locator 函數，使其能精準匹配指定的 nceid
+def check_for_updates():
+    """檢查 GitHub 上是否有新版本，如果有，則下載、覆蓋並重啟。"""
+    print("[OTA] 正在檢查更新...")
+    try:
+        response = requests.get(VERSION_URL, timeout=10)
+        if response.status_code != 200:
+            blynk.virtual_write(11, f"無法獲取版本文件: {response.status_code}")
+            return
+        remote_version = float(response.text.strip())
+        print(f"[OTA] 當前版本: {CURRENT_VERSION}, 遠端版本: {remote_version}")
+        if remote_version > CURRENT_VERSION:
+            print(f"[OTA] 發現新版本 {remote_version}，準備下載...")
+            blynk.virtual_write(11, f"發現新版本 {remote_version}...")
+            script_response = requests.get(SCRIPT_URL, timeout=30)
+            if script_response.status_code != 200:
+                blynk.virtual_write(11, f"下載失敗: {script_response.status_code}")
+                return
+            new_script_content = script_response.text
+            script_path = os.path.abspath(__file__)
+            with open(script_path, 'w', encoding='utf-8') as f:
+                f.write(new_script_content)
+            print(f"[OTA] 程式碼已成功更新至版本 {remote_version}。 3 秒後重啟...")
+            blynk.virtual_write(11, f"更新完畢，重啟中...")
+            time.sleep(3)
+            os.execv(sys.executable, ['python'] + sys.argv)
+        else:
+            print("[OTA] 目前已是最新版本。")
+            blynk.virtual_write(11, "已是最新版本")
+    except Exception as e:
+        print(f"[OTA] 更新過程中發生未知錯誤: {e}")
+        blynk.virtual_write(11, f"更新時發生錯誤")
+
 def locator():
-    """
-    透過 1NCE API 獲取指定 nceid 設備的最新 GPS 位置。
-    """
+    """透過 1NCE API 獲取指定 nceid 設備的最新 GPS 位置。"""
     print("正在透過 1NCE API 獲取 GPS 位置...")
-    # --- 第一步：獲取 Access Token ---
     url_token = "https://api.1nce.com/management-api/oauth/token"
     payload = {"grant_type": "client_credentials"}
     headers_token = {"accept": "application/json", "content-type": "application/json", "authorization": nceid_token}
@@ -45,61 +78,29 @@ def locator():
         token_response = requests.post(url_token, json=payload, headers=headers_token, timeout=10)
         token_response.raise_for_status()
         access_token = token_response.json().get('access_token')
-        if not access_token:
-            print("從 1NCE 獲取 Access Token 失敗。")
-            return None
-        print("成功獲取 1NCE Access Token。")
-    except requests.exceptions.RequestException as e:
-        print(f"請求 1NCE Access Token 時發生網路錯誤: {e}")
-        return None
-
-    # --- 第二步：使用 Access Token 獲取最新位置列表 ---
-    if not access_token:
-        return None
-
-    # 此端點獲取帳戶下最新的位置事件
-    url_location = "https://api.1nce.com/management-api/v1/locate/positions/latest?page=1&per_page=10" # 稍微多獲取幾筆以防萬一
+        if not access_token: return None
+    except: return None
+    url_location = "https://api.1nce.com/management-api/v1/locate/positions/latest?page=1&per_page=10"
     headers_location = {"accept": "application/json", "authorization": f"Bearer {access_token}"}
-    
     try:
         gps_response = requests.get(url_location, headers=headers_location, timeout=15)
         gps_response.raise_for_status()
         data = gps_response.json()
-
-        # [最終修正] 遍歷返回的列表，找到與 nceid 匹配的設備
         positions_list = data.get('coordinates')
         if positions_list:
             for position_data in positions_list:
                 if position_data.get('deviceId') == nceid:
-                    print(f"在 API 回應中找到匹配的設備 ID: {nceid}")
                     coord_array = position_data.get('coordinate')
                     if coord_array and len(coord_array) == 2:
-                        lon = coord_array[0]
-                        lat = coord_array[1]
-                        location_str = f"{lat},{lon}"
-                        print(f"成功解析 1NCE 位置: {location_str}")
-                        return location_str
-                    else:
-                        # 找到了設備但沒有座標
-                        break # 不用再找了
-            
-            # 如果迴圈結束都沒找到匹配的設備
-            print(f"解析錯誤：在 API 回應中未找到設備 ID 為 {nceid} 的位置資訊。")
-            return None
-        else:
-            print("解析錯誤：回應中未找到 'coordinates' 列表或列表為空。")
-            return None
-            
-    except requests.exceptions.RequestException as e:
-        print(f"請求 1NCE 位置時發生網路錯誤: {e}")
-        return None
-    except (IndexError, KeyError, TypeError) as e:
-        print(f"解析 1NCE 位置資料時出錯: {e}")
-        return None
+                        return f"{coord_array[1]},{coord_array[0]}" # 緯度,經度
+            return None # 列表中沒有找到匹配的 deviceId
+        return None # 回應中沒有 'coordinates' 列表
+    except: return None
 
 def power_read_and_send(message_list, client, location):
+    """解析數據並上傳到 Blynk，回傳是否成功"""
+    all_uploads_successful = True
     pggg, paaa, pppp, pgaa, pgpp = [], [], [], [], []
-
     for data_string in message_list:
         try:
             parts = data_string.split('/')
@@ -115,25 +116,17 @@ def power_read_and_send(message_list, client, location):
             pggg.append([time_stamp_utc, pg_val])
             paaa.append([time_stamp_utc, pa_calibrated])
             pppp.append([time_stamp_utc, pp_calibrated])
-            pgaa.append([time_stamp_utc, f"{pga_efficiency:.3f}"])
-            pgpp.append([time_stamp_utc, f"{pgp_efficiency:.3f}"])
-        except Exception as e:
-            print(f"解析數據 '{data_string}' 時發生錯誤: {e}")
-            continue
-
-    if not pggg:
-        return
+            pgaa.append([time_stamp_utc, pga_efficiency])
+            pgpp.append([time_stamp_utc, pgp_efficiency])
+        except: continue
+    if not pggg: return True
 
     if len(pggg) == 1:
         try:
-            blynk.virtual_write(4, pggg[0][1])
-            blynk.virtual_write(5, paaa[0][1])
-            blynk.virtual_write(6, pppp[0][1])
-            blynk.virtual_write(7, float(pgaa[0][1]))
-            blynk.virtual_write(8, float(pgpp[0][1]))
-        except Exception as e:
-            print(f"Blynk 單筆上傳時發生錯誤: {e}")
-
+            blynk.virtual_write(4, pggg[0][1]); blynk.virtual_write(5, paaa[0][1])
+            blynk.virtual_write(6, pppp[0][1]); blynk.virtual_write(7, pgaa[0][1])
+            blynk.virtual_write(8, pgpp[0][1])
+        except Exception as e: print(f"Blynk 單筆上傳時發生錯誤: {e}"); all_uploads_successful = False
     elif len(pggg) > 1:
         headers = {'Content-type': 'application/json'}
         base_url = f'https://blynk.cloud/external/api/batch/update?token={blynk_token}'
@@ -142,100 +135,111 @@ def power_read_and_send(message_list, client, location):
             for pin_name, data_list in data_to_upload.items():
                 upload_url = f'{base_url}&pin={pin_name}'
                 response = requests.post(upload_url, headers=headers, json=data_list, timeout=15)
-                print(f"{pin_name} 上傳回應: {response.status_code}")
-                if response.status_code != 200:
-                    print(f"RESPONSE BODY for {pin_name}: {response.text}")
-        except requests.exceptions.RequestException as e:
-            print(f"Blynk 批次上傳時發生網路錯誤: {e}")
-
+                if response.status_code != 200: all_uploads_successful = False
+        except: all_uploads_successful = False
+    
     if location:
         try:
-            loc_parts = location.split(',')
-            blynk.virtual_write(10, loc_parts[0], loc_parts[1], "Solar Tracker")
-        except Exception as e:
-            print(f"上傳 GPS 位置時出錯: {e}")
+            loc_parts = location.split(','); blynk.virtual_write(10, loc_parts[0], loc_parts[1], "Solar Tracker")
+        except: pass
+    return all_uploads_successful
 
 def connect_mqtt():
     def on_connect(client, userdata, flags, rc): print(f"連接本地 MQTT Broker {'成功' if rc == 0 else '失敗'}")
-    client = mqtt_client.Client(client_id)
-    client.username_pw_set(username, password)
-    client.on_connect = on_connect
-    client.connect(broker, port)
+    client = mqtt_client.Client(client_id); client.username_pw_set(username, password)
+    client.on_connect = on_connect; client.connect(broker, port)
     return client
 
 def subscribe(client: mqtt_client):
     def on_message(client, userdata, msg):
         global message
         message = [item for item in msg.payload.decode().strip('"').split(',') if item]
-    client.subscribe(topic_sub)
-    client.on_message = on_message
+    client.subscribe(topic_sub); client.on_message = on_message
 
 db_name = f"solarsdgs{iot}.db"
 def create_database():
     with sqlite3.connect(db_name) as conn:
         conn.cursor().execute("""CREATE TABLE IF NOT EXISTS TatungForeverEnergy (
-                     ID INTEGER PRIMARY KEY AUTOINCREMENT, TIME TEXT, LOCATION TEXT, PG INTEGER, PA INTEGER, PP INTEGER)""")
-    print("資料庫確認完畢。")
+                     ID INTEGER PRIMARY KEY AUTOINCREMENT, 
+                     TIME TEXT UNIQUE, 
+                     LOCATION TEXT, PG INTEGER, PA INTEGER, PP INTEGER)""")
+    print("資料庫確認完畢 (TIME 欄位已設為唯一)。")
 
-def insert_database(timestring, location, pg, pa, pp):
+def insert_database_batch(new_data_list):
+    if not new_data_list: return
     with sqlite3.connect(db_name) as conn:
-        conn.cursor().execute("INSERT INTO TatungForeverEnergy(TIME, LOCATION, PG, PA, PP) VALUES(?, ?, ?, ?, ?)",
-                      (timestring, location, pg, pa, pp))
+        conn.executemany("INSERT OR IGNORE INTO TatungForeverEnergy(TIME, LOCATION, PG, PA, PP) VALUES(?, ?, ?, ?, ?)", new_data_list)
+    print(f"資料庫批次寫入完成，共處理 {len(new_data_list)} 筆新數據。")
+
+def get_existing_timestamps(c):
+    c.execute('SELECT TIME FROM TatungForeverEnergy')
+    return {row[0] for row in c.fetchall()}
 
 # --- Blynk 設定 ---
 try:
     blynk = BlynkLib.Blynk(blynk_token)
-except Exception as e:
-    print(f"Blynk 連線失敗: {e}, 10秒後重啟。"); time.sleep(10); system('reboot')
+except Exception as e: system('reboot')
 
 @blynk.on("V0")
-def v0_write_handler(value): global factor_a; factor_a = float(value[0]); print(f'factor_a 更新為: {factor_a}')
+def v0_write_handler(value): global factor_a; factor_a = float(value[0])
 @blynk.on("V1")
-def v1_write_handler(value): global factor_p; factor_p = float(value[0]); print(f'factor_p 更新為: {factor_p}')
+def v1_write_handler(value): global factor_p; factor_p = float(value[0])
 @blynk.on("V3")
-def v3_write_handler(value): global pizero2_on; pizero2_on = str(value[0]); print(f'pizero2_on 更新為: {pizero2_on}')
+def v3_write_handler(value): global pizero2_on; pizero2_on = str(value[0])
 @blynk.on("V9")
-def v9_write_handler(value): global pizero2_off; pizero2_off = str(value[0]); print(f'pizero2_off 更新為: {pizero2_off}')
-
+def v9_write_handler(value): global pizero2_off; pizero2_off = str(value[0])
+@blynk.on("V11")
+def v11_write_handler(value):
+    if value and value[0] == '1': blynk.virtual_write(11, "檢查更新中..."); check_for_updates()
 @blynk.on("connected")
-def blynk_connected(): print("Blynk 已連接，同步伺服器數值..."); blynk.sync_virtual(0, 1, 3, 9)
+def blynk_connected(): blynk.sync_virtual(0, 1, 3, 9, 11)
 
 # --- 主程式初始化 ---
 create_database()
 client = connect_mqtt()
 default_location = "24.960938,121.247177"
 location = locator()
-if location is None:
-    location = default_location
-    print("無法從 1NCE 獲取準確位置，將使用預設值。")
+if location is None: location = default_location
 
 # --- 主迴圈 ---
 while True:
-    client.loop_start()
-    subscribe(client)
-    blynk.run()
+    client.loop_start(); subscribe(client); blynk.run()
 
     if message and message != message_check:
-        print(f"偵測到 {len(message)} 筆新數據，開始處理...")
+        print(f"偵測到 {len(message)} 筆數據，開始進行去重處理...")
+        new_data_to_process = []
+        new_data_for_db = []
         
-        for data_string in message:
-            try:
-                sql_data = data_string.split('/')
-                insert_database(sql_data[0], location, int(sql_data[1]), int(sql_data[2]), int(sql_data[3]))
-            except (IndexError, ValueError): continue
-        print("資料庫儲存完畢。")
+        try:
+            with sqlite3.connect(db_name) as conn:
+                existing_timestamps = get_existing_timestamps(conn.cursor())
+            
+            for data_string in message:
+                timestamp = data_string.split('/')[0]
+                if timestamp not in existing_timestamps:
+                    new_data_to_process.append(data_string)
+                    sql_data = data_string.split('/')
+                    new_data_for_db.append((sql_data[0], location, int(sql_data[1]), int(sql_data[2]), int(sql_data[3])))
 
-        power_read_and_send(message, client, location)
-        
-        message_check = list(message)
+            if new_data_to_process:
+                print(f"去重後，有 {len(new_data_to_process)} 筆全新數據需要處理。")
+                insert_database_batch(new_data_for_db)
+                upload_successful = power_read_and_send(new_data_to_process, client, location)
+                if upload_successful:
+                    print("Blynk 上傳成功，已發送 ACK。")
+                    client.publish(topic_ack, "OK")
+                else:
+                    print("Blynk 上傳失敗，未發送 ACK，數據將在下一輪重試。")
+            else:
+                print("收到的均為重複數據，直接發送 ACK 以協助 Pico 清除暫存。")
+                client.publish(topic_ack, "OK")
+            
+            # 無論處理結果如何，都將 message 標記為已檢查
+            message_check = list(message)
+            # 發送最新的 on/off 時間
+            client.publish(topic_pub, f"{pizero2_on}_{pizero2_off}")
 
-        print(f"處理完成，發送 ACK 確認訊息至主題 '{topic_ack}'")
-        client.publish(topic_ack, "OK")
-        
-        client.publish(topic_pub, f"{pizero2_on}_{pizero2_off}")
+        except Exception as e:
+            print(f"數據處理主流程發生嚴重錯誤: {e}")
 
-    else:
-        print("無新數據。")
-
-    client.loop_stop()
-    time.sleep(5)
+    client.loop_stop(); time.sleep(5)
