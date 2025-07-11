@@ -122,7 +122,7 @@ try:
     with open("pizero2on.txt", "r") as f1: pizero2_on = int(f1.read())
     with open("pizero2off.txt", "r") as f2: pizero2_off = int(f2.read())
 except (OSError, ValueError):
-    pizero2_on, pizero2_off = 30, 40
+    pizero2_on, pizero2_off = 30, 50
 
 reset_hour, reset_minute = 12, 10
 sleep_hour = 19
