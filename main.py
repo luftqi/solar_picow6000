@@ -17,7 +17,7 @@ wdt = machine.WDT(timeout=8000)
 
 # 全域變數
 ack_received = False
-iot = "6002"
+iot = "6000"
 wifi_wait_time = 60
 LOOP_INTERVAL = 33 
 
