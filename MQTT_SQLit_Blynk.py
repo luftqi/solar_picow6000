@@ -15,15 +15,15 @@ iot = '6000'
 blynk_token = 'vIrmXGCdWURWrX-FFEsUoDTFNXPmyiVM'
 nceid = '8988228066614762251'
 nceid_token = "Basic Z3JheUBzb2xhcnNkZ3MuY29tOjk2NzYyMzY0"
-CURRENT_VERSION = 3.0 
+CURRENT_VERSION = 4.5 
 VERSION_URL = f"https://raw.githubusercontent.com/luftqi/solar_picow{iot}/main/pizero_version.txt"
-SCRIPT_URL = f"https://raw.githubusercontent.com/luftqi/solar_picow{iot}/main/MQTT_SQLit_Blynk.py"
+SCRIPT_URL = "https://raw.githubusercontent.com/luftqi/solar_picow{iot}/main/MQTT_SQLit_Blynk.py"
 
 # --- 全域變數 ---
 factor_a, factor_p = 1.0, 1.0
 pizero2_on, pizero2_off = "30", "50"
 message, message_check = [], []
-blynk = None # <-- 在此處初始化 blynk 變數
+blynk = None 
 
 # --- MQTT 設定 ---
 broker = '127.0.0.1'
@@ -31,6 +31,7 @@ port = 1883
 topic_sub = "pg_pa_pp"
 topic_pub = "pizero2onoff"
 topic_ack = "pico/ack"
+pico_control_topic = "pico/control" 
 client_id = f'pizero{iot}_0'
 username = f'solarsdgs{iot}'
 password = '82767419'
@@ -95,7 +96,7 @@ def locator():
         return None
     except: return None
 
-def power_read_and_send(message_list, client, location):
+def power_read_and_send(message_list, client_mqtt, location): 
     all_uploads_successful = True
     pggg, paaa, pppp, pgaa, pgpp = [], [], [], [], []
     for data_string in message_list:
@@ -137,17 +138,41 @@ def power_read_and_send(message_list, client, location):
         except: pass
     return all_uploads_successful
 
-def connect_mqtt():
-    def on_connect(client, userdata, flags, rc): print(f"連接本地 MQTT Broker {'成功' if rc == 0 else '失敗'}")
-    client = mqtt_client.Client(client_id); client.username_pw_set(username, password)
-    client.on_connect = on_connect; client.connect(broker, port)
-    return client
+# 用於追蹤連線狀態，避免重複打印成功訊息
+_mqtt_connected_once = False 
 
-def subscribe(client: mqtt_client):
-    def on_message(client, userdata, msg):
+def connect_mqtt():
+    global _mqtt_connected_once
+    # on_connect 回調函數只在連線建立或重新建立時被呼叫
+    def on_connect(client_mqtt, userdata, flags, rc): 
+        global _mqtt_connected_once
+        if rc == 0:
+            if not _mqtt_connected_once: # 只有在第一次成功連線時打印
+                print("連接本地 MQTT Broker 成功")
+                _mqtt_connected_once = True
+        else:
+            print(f"連接本地 MQTT Broker 失敗，錯誤碼: {rc}")
+            _mqtt_connected_once = False # 連線失敗則重置標記
+
+    client_mqtt = mqtt_client.Client(client_id); 
+    client_mqtt.username_pw_set(username, password)
+    client_mqtt.on_connect = on_connect; 
+    
+    # 嘗試連接，但不要在這裡打印成功訊息，交給 on_connect
+    try:
+        client_mqtt.connect(broker, port)
+    except Exception as e:
+        print(f"連接 MQTT Broker 時發生異常: {e}")
+        _mqtt_connected_once = False
+        raise # 重新拋出異常，讓外層知道連線失敗
+
+    return client_mqtt
+
+def subscribe(client_mqtt: mqtt_client):
+    def on_message(client_mqtt, userdata, msg):
         global message
         message = [item for item in msg.payload.decode().strip('"').split(',') if item]
-    client.subscribe(topic_sub); client.on_message = on_message
+    client_mqtt.subscribe(topic_sub); client_mqtt.on_message = on_message
 
 db_name = f"solarsdgs{iot}.db"
 def create_database():
@@ -209,14 +234,36 @@ def v11_write_handler(value):
         blynk.virtual_write(11, 0)
         check_for_updates()
 
+@blynk.on("V13") 
+def v13_write_handler(value):
+    print(f"[REBOOT_PICO] V13 write event received! Value: {value}")
+    if value and value[0] == '1':
+        print("[REBOOT_PICO] 收到重啟 Pico 指令，發送 MQTT 訊息...")
+        try:
+            client.publish(pico_control_topic, "reboot")
+            blynk.virtual_write(13, 0) # 將按鈕狀態重置為 OFF
+            print("[REBOOT_PICO] MQTT 重啟指令已發送。")
+        except Exception as e:
+            print(f"[REBOOT_PICO] 發送 MQTT 重啟指令失敗: {e}")
+            blynk.virtual_write(13, 0) # 無論如何都重置按鈕
+
 @blynk.on("connected")
 def blynk_connected():
     print("Blynk 已連接，同步伺服器數值...")
-    blynk.sync_virtual(0, 1, 3, 9, 11, 12)
+    blynk.sync_virtual(0, 1, 3, 9, 11, 12, 13) 
 
 # --- 主程式初始化 ---
 create_database()
-client = connect_mqtt()
+try: # <--- 新增 try-except 塊，處理 connect_mqtt 失敗的情況
+    client = connect_mqtt() 
+    client.loop_start() 
+    subscribe(client) 
+except Exception as e:
+    print(f"MQTT 客戶端初始化失敗，程式將重試: {e}")
+    # 這裡可以選擇退出程式或等待，讓外部服務管理工具（如 systemd）重啟腳本
+    # 為了簡潔，這裡只是打印錯誤，程式會繼續運行，但沒有工作的 MQTT client
+    client = None # 確保 client 為 None
+
 default_location = "24.960938,121.247177"
 location = locator()
 if location is None: location = default_location
@@ -224,49 +271,51 @@ print(f"目前使用的位置: {location}")
 
 # --- 主迴圈 ---
 while True:
-    client.loop_start()
-    subscribe(client)
-    blynk.run()
+    blynk.run() 
+    
+    # 只有當 client 成功初始化時才執行 MQTT 相關邏輯
+    if client: 
+        if message and message != message_check:
+            print(f"\n偵測到新訊息 (包含 {len(message)} 筆數據)，開始處理...")
+            new_data_to_process = []
+            new_data_for_db = []
+            try:
+                with sqlite3.connect(db_name) as conn:
+                    existing_timestamps = get_existing_timestamps(conn.cursor())
+                
+                for data_string in message:
+                    try:
+                        timestamp = data_string.split('/')[0]
+                        if timestamp not in existing_timestamps:
+                            new_data_to_process.append(data_string)
+                            sql_data = data_string.split('/')
+                            new_data_for_db.append((sql_data[0], location, int(sql_data[1]), int(sql_data[2]), int(sql_data[3])))
+                    except: continue
 
-    if message and message != message_check:
-        print(f"\n偵測到新訊息 (包含 {len(message)} 筆數據)，開始處理...")
-        new_data_to_process = []
-        new_data_for_db = []
-        try:
-            with sqlite3.connect(db_name) as conn:
-                existing_timestamps = get_existing_timestamps(conn.cursor())
-            
-            for data_string in message:
-                try:
-                    timestamp = data_string.split('/')[0]
-                    if timestamp not in existing_timestamps:
-                        new_data_to_process.append(data_string)
-                        sql_data = data_string.split('/')
-                        new_data_for_db.append((sql_data[0], location, int(sql_data[1]), int(sql_data[2]), int(sql_data[3])))
-                except: continue
-
-            if new_data_to_process:
-                print(f"去重後，有 {len(new_data_to_process)} 筆全新數據需要處理。")
-                insert_database_batch(new_data_for_db)
-                upload_successful = power_read_and_send(new_data_to_process, client, location)
-                if upload_successful:
-                    print("Blynk 上傳成功，已發送 ACK。")
+                if new_data_to_process:
+                    print(f"去重後，有 {len(new_data_to_process)} 筆全新數據需要處理。")
+                    insert_database_batch(new_data_for_db)
+                    upload_successful = power_read_and_send(new_data_to_process, client, location) 
+                    if upload_successful:
+                        print("Blynk 上傳成功，已發送 ACK。")
+                        message_check = list(message)
+                        client.publish(topic_ack, "OK")
+                    else:
+                        print("Blynk 上傳失敗，未發送 ACK，數據將在下一輪重試。")
+                else:
+                    print("收到的均為重複數據，直接發送 ACK 以協助 Pico 清除暫存。")
                     message_check = list(message)
                     client.publish(topic_ack, "OK")
-                else:
-                    print("Blynk 上傳失敗，未發送 ACK，數據將在下一輪重試。")
-            else:
-                print("收到的均為重複數據，直接發送 ACK 以協助 Pico 清除暫存。")
-                message_check = list(message)
-                client.publish(topic_ack, "OK")
-            
-            client.publish(topic_pub, f"{pizero2_on}_{pizero2_off}")
+                
+                client.publish(topic_pub, f"{pizero2_on}_{pizero2_off}")
 
-        except Exception as e:
-            print(f"數據處理主流程發生嚴重錯誤: {e}")
+            except Exception as e:
+                print(f"數據處理主流程發生嚴重錯誤: {e}")
+        else:
+            if message == message_check:
+                print("無新數據。")
     else:
-        if message == message_check:
-            print("無新數據。")
-            
-    client.loop_stop()
+        print("MQTT 客戶端未初始化或已斷開，跳過數據處理。") # <--- 新增提示
+
     time.sleep(5)
+
