@@ -1,12 +1,14 @@
+# new_solarsdgs_6002_pizero2.py (最終版 - 恢復自身OTA功能)
+
 import BlynkLib
 from paho.mqtt import client as mqtt_client
 import time
 import datetime
 import json
+import logging
 import sqlite3
 import requests
 import os
-import sys
 from os import system
 
 # --- 設定 ---
@@ -15,15 +17,22 @@ iot = '6000'
 blynk_token = 'vIrmXGCdWURWrX-FFEsUoDTFNXPmyiVM'
 nceid = '8988228066614762251'
 nceid_token = "Basic Z3JheUBzb2xhcnNkZ3MuY29tOjk2NzYyMzY0"
-CURRENT_VERSION = 3.0 
-VERSION_URL = f"https://raw.githubusercontent.com/luftqi/solar_picow{iot}/main/pizero_version.txt"
-SCRIPT_URL = "https://raw.githubusercontent.com/luftqi/solar_picow{iot}/main/MQTT_SQLit_Blynk.py"
+
+
+# --- Pi Zero 自身 OTA 更新設定 (來自您的原始程式碼) ---
+PIZERO_CURRENT_VERSION = 2.0 
+PIZERO_VERSION_URL = f"https://raw.githubusercontent.com/luftqi/solar_picow{iot}/main/pizero_version.txt"
+PIZERO_SCRIPT_URL = f"https://raw.githubusercontent.com/luftqi/solar_picow{iot}/main/MQTT_SQLit_Blynk.py"
+
+# --- Pico W 遠端管理設定 ---
+SAFE_PICO_MAIN_PY_PATH = 'main_pico_safe_copy.py' 
 
 # --- 全域變數 ---
 factor_a, factor_p = 1.0, 1.0
 pizero2_on, pizero2_off = "30", "50"
 message, message_check = [], []
-blynk = None # <-- 在此處初始化 blynk 變數
+blynk = None 
+client = None
 
 # --- MQTT 設定 ---
 broker = '127.0.0.1'
@@ -31,40 +40,48 @@ port = 1883
 topic_sub = "pg_pa_pp"
 topic_pub = "pizero2onoff"
 topic_ack = "pico/ack"
+pico_control_topic = "pico/control" 
 client_id = f'pizero{iot}_0'
 username = f'solarsdgs{iot}'
 password = '82767419'
+topic_pico_cmd_in = f'pico/{iot}/cmd/in'
+topic_pico_cmd_out = f'pico/{iot}/cmd/out'
+topic_pico_admin_ota = f'pico/{iot}/admin/run_ota'
+topic_pico_admin_rescue = f'pico/{iot}/admin/enter_rescue'
+topic_pico_rescue_in = f'pico/{iot}/rescue/in'
+topic_pico_rescue_out = f'pico/{iot}/rescue/out'
+
 
 # --- 函數定義 ---
 def check_for_updates():
-    """檢查 GitHub 上是否有新版本，如果有，則下載、覆蓋並重啟。"""
-    print("[OTA] 正在檢查更新...")
+    """檢查 GitHub 上是否有 Pi Zero 自身的新版本，並執行更新。"""
+    print("[PIZERO_OTA] 正在檢查 Pi Zero 自身更新...")
     try:
-        blynk.virtual_write(12, "檢查版本...")
-        response = requests.get(VERSION_URL, timeout=10)
+        blynk.virtual_write(12, "檢查 PiZero 版本...")
+        response = requests.get(PIZERO_VERSION_URL, timeout=10)
         if response.status_code != 200:
-            blynk.virtual_write(12, f"無法獲取版本文件: {response.status_code}")
+            blynk.virtual_write(12, f"無法獲取 PiZero 版本文件: {response.status_code}")
             return
         remote_version = float(response.text.strip())
-        print(f"[OTA] 當前版本: {CURRENT_VERSION}, 遠端版本: {remote_version}")
-        if remote_version > CURRENT_VERSION:
-            blynk.virtual_write(12, f"發現新版本 {remote_version}...")
-            script_response = requests.get(SCRIPT_URL, timeout=30)
+        print(f"[PIZERO_OTA] 當前版本: {PIZERO_CURRENT_VERSION}, 遠端版本: {remote_version}")
+        if remote_version > PIZERO_CURRENT_VERSION:
+            blynk.virtual_write(12, f"發現 PiZero 新版本 {remote_version}...")
+            script_response = requests.get(PIZERO_SCRIPT_URL, timeout=30)
             if script_response.status_code != 200:
-                blynk.virtual_write(12, f"下載失敗: {script_response.status_code}")
+                blynk.virtual_write(12, f"PiZero 下載失敗: {script_response.status_code}")
                 return
             new_script_content = script_response.text
             script_path = os.path.abspath(__file__)
             with open(script_path, 'w', encoding='utf-8') as f:
                 f.write(new_script_content)
-            blynk.virtual_write(12, f"更新完畢，重啟中...")
+            blynk.virtual_write(12, f"PiZero 更新完畢，重啟中...")
             time.sleep(3)
             system('reboot')
         else:
-            blynk.virtual_write(12, "已是最新版本")
+            blynk.virtual_write(12, "PiZero 已是最新版本")
     except Exception as e:
-        print(f"[OTA] 更新過程中發生未知錯誤: {e}")
-        blynk.virtual_write(12, f"更新時發生錯誤")
+        print(f"[PIZERO_OTA] 更新過程中發生未知錯誤: {e}")
+        blynk.virtual_write(12, f"PiZero 更新時發生錯誤")
 
 def locator():
     print("正在透過 1NCE API 獲取 GPS 位置...")
@@ -95,7 +112,7 @@ def locator():
         return None
     except: return None
 
-def power_read_and_send(message_list, client, location):
+def power_read_and_send(message_list, client_mqtt, location): 
     all_uploads_successful = True
     pggg, paaa, pppp, pgaa, pgpp = [], [], [], [], []
     for data_string in message_list:
@@ -137,17 +154,57 @@ def power_read_and_send(message_list, client, location):
         except: pass
     return all_uploads_successful
 
-def connect_mqtt():
-    def on_connect(client, userdata, flags, rc): print(f"連接本地 MQTT Broker {'成功' if rc == 0 else '失敗'}")
-    client = mqtt_client.Client(client_id); client.username_pw_set(username, password)
-    client.on_connect = on_connect; client.connect(broker, port)
-    return client
+_mqtt_connected_once = False 
 
-def subscribe(client: mqtt_client):
-    def on_message(client, userdata, msg):
+def connect_mqtt():
+    global _mqtt_connected_once
+    def on_connect(client_mqtt, userdata, flags, rc): 
+        global _mqtt_connected_once
+        if rc == 0:
+            if not _mqtt_connected_once:
+                print("連接本地 MQTT Broker 成功")
+                _mqtt_connected_once = True
+            subscribe(client_mqtt)
+            print("已訂閱所有相關 MQTT 主題。")
+        else:
+            print(f"連接本地 MQTT Broker 失敗，錯誤碼: {rc}")
+            _mqtt_connected_once = False 
+
+    client_mqtt = mqtt_client.Client(client_id); 
+    client_mqtt.username_pw_set(username, password)
+    client_mqtt.on_connect = on_connect; 
+    
+    try:
+        client_mqtt.connect(broker, port)
+    except Exception as e:
+        print(f"連接 MQTT Broker 時發生異常: {e}")
+        _mqtt_connected_once = False
+        raise
+
+    return client_mqtt
+
+def subscribe(client_mqtt: mqtt_client):
+    def on_message(client_mqtt, userdata, msg):
         global message
-        message = [item for item in msg.payload.decode().strip('"').split(',') if item]
-    client.subscribe(topic_sub); client.on_message = on_message
+        topic = msg.topic
+        payload = msg.payload.decode()
+
+        print(f"收到來自主題 '{topic}' 的訊息: {payload}")
+
+        if topic == topic_sub:
+            message = [item for item in payload.strip('"').split(',') if item]
+        elif topic == topic_pico_cmd_out:
+            print(f"<<< 收到來自 Pico REPL 的結果: {payload}")
+            blynk.virtual_write(20, payload)
+        elif topic == topic_pico_rescue_out:
+            print(f"[RESCUE] 來自 Pico 救援通道的回應: {payload}")
+            blynk.virtual_write(20, f"[RESCUE] {payload}")
+    
+    print("正在訂閱主題...")
+    client_mqtt.subscribe(topic_sub)
+    client_mqtt.subscribe(topic_pico_cmd_out)
+    client_mqtt.subscribe(topic_pico_rescue_out)
+    client_mqtt.on_message = on_message
 
 db_name = f"solarsdgs{iot}.db"
 def create_database():
@@ -177,6 +234,7 @@ while blynk is None:
         print("將在 15 秒後重試...")
         time.sleep(15)
 
+# --- Blynk 虛擬腳位處理函數 ---
 @blynk.on("V0")
 def v0_write_handler(value): 
     global factor_a
@@ -201,22 +259,105 @@ def v9_write_handler(value):
     if value: pizero2_off = str(value[0])
     print(f'pizero2_off 更新為: {pizero2_off}')
 
+# --- 程式碼恢復：V11 處理函數，用於 Pi Zero 自身更新 ---
+# 註解：此函數為您原始程式碼中的功能，現已恢復正常運作。
 @blynk.on("V11")
 def v11_write_handler(value):
-    print(f"[OTA HANDLER] V11 write event received! Value: {value}")
+    print(f"[PIZERO_OTA_HANDLER] V11 write event received! Value: {value}")
     if value and value[0] == '1':
-        print("[OTA] Switch ON detected. Initiating update process...")
+        print("[PIZERO_OTA] Switch ON detected. Initiating self-update process...")
         blynk.virtual_write(11, 0)
         check_for_updates()
+
+@blynk.on("V13") 
+def v13_write_handler(value):
+    print(f"[REBOOT_PICO] V13 write event received! Value: {value}")
+    if value and value[0] == '1':
+        print("[REBOOT_PICO] 收到重啟 Pico 指令，發送 MQTT 訊息...")
+        blynk.virtual_write(13, 0)
+        try:
+            if client and client.is_connected():
+                client.publish(pico_control_topic, "reboot")
+                print("[REBOOT_PICO] MQTT 重啟指令已發送。")
+            else:
+                print("[REBOOT_PICO] 發送失敗，MQTT 未連線。")
+        except Exception as e:
+            print(f"[REBOOT_PICO] 發送 MQTT 重啟指令失敗: {e}")
+
+@blynk.on("V14")
+def v14_trigger_pico_ota_handler(value):
+    if value and value[0] == '1':
+        blynk.virtual_write(14, 0)
+        print("[PICO_MANAGE] 收到觸發 Pico OTA 指令...")
+        blynk.virtual_write(20, "[PICO_MANAGE] 正在命令 Pico 執行自身 OTA...")
+        if client and client.is_connected():
+            client.publish(topic_pico_admin_ota, '1')
+        else:
+            blynk.virtual_write(20, "錯誤：MQTT 未連線！")
+
+@blynk.on("V15")
+def v15_enter_rescue_handler(value):
+    if value and value[0] == '1':
+        blynk.virtual_write(15, 0)
+        print("[PICO_RESCUE] 收到指令：讓 Pico 進入永久救援模式...")
+        blynk.virtual_write(20, "[PICO_RESCUE] 正在命令 Pico 建立救援旗標並重啟...")
+        if client and client.is_connected():
+            client.publish(topic_pico_admin_rescue, '1')
+        else:
+            blynk.virtual_write(20, "[PICO_RESCUE] 錯誤：MQTT 未連線！")
+
+@blynk.on("V16")
+def v16_send_rescue_code_handler(value):
+    if value and value[0] == '1':
+        blynk.virtual_write(16, 0)
+        print("[PICO_RESCUE] 收到指令：發送安全的 main.py 備份...")
+        blynk.virtual_write(20, f"[PICO_RESCUE] 讀取備份檔 {SAFE_PICO_MAIN_PY_PATH} 並發送...")
+        try:
+            with open(SAFE_PICO_MAIN_PY_PATH, 'r', encoding='utf-8') as f:
+                safe_code = f.read()
+            if client and client.is_connected():
+                client.publish(topic_pico_rescue_in, safe_code, qos=1)
+                blynk.virtual_write(20, "救援包已發送，請觀察 Pico 的回應。")
+            else:
+                blynk.virtual_write(20, "[PICO_RESCUE] 錯誤：MQTT 未連線！")
+        except FileNotFoundError:
+            blynk.virtual_write(20, f"[PICO_RESCUE] 錯誤：找不到備份檔 {SAFE_PICO_MAIN_PY_PATH}！")
+        except Exception as e:
+            blynk.virtual_write(20, f"[PICO_RESCUE] 發送備份時出錯: {e}")
+
+@blynk.on("V20")
+def v20_terminal_handler(value):
+    if value:
+        command = value[0]
+        print(f">>> 發送指令到 Pico: {command}")
+        blynk.virtual_write(20, f'>>> {command}\n') 
+        try:
+            if client and client.is_connected():
+                client.publish(topic_pico_cmd_in, command)
+            else:
+                err_msg = "錯誤：MQTT 未連線，無法發送指令。"
+                print(err_msg)
+                blynk.virtual_write(20, err_msg)
+        except Exception as e:
+            err_msg = f"錯誤：發送指令時發生異常: {e}"
+            print(err_msg)
+            blynk.virtual_write(20, err_msg)
 
 @blynk.on("connected")
 def blynk_connected():
     print("Blynk 已連接，同步伺服器數值...")
-    blynk.sync_virtual(0, 1, 3, 9, 11, 12)
+    blynk.sync_virtual(0, 1, 3, 9, 11, 12, 13, 14, 15, 16, 20) 
 
 # --- 主程式初始化 ---
 create_database()
-client = connect_mqtt()
+try:
+    client = connect_mqtt() 
+    # --- 程式碼修正：停用會造成衝突的 loop_start() ---
+    # client.loop_start() 
+except Exception as e:
+    print(f"MQTT 客戶端初始化失敗，程式將重試: {e}")
+    client = None
+
 default_location = "24.960938,121.247177"
 location = locator()
 if location is None: location = default_location
@@ -224,49 +365,55 @@ print(f"目前使用的位置: {location}")
 
 # --- 主迴圈 ---
 while True:
-    client.loop_start()
-    subscribe(client)
-    blynk.run()
+    blynk.run() 
+    
+    # --- 程式碼修正：將 MQTT 事件處理移至主迴圈，與 Blynk 協同運作 ---
+    if client:
+        client.loop(timeout=0.01) # 給予 MQTT 客戶端一小段時間來處理網路事件
 
-    if message and message != message_check:
-        print(f"\n偵測到新訊息 (包含 {len(message)} 筆數據)，開始處理...")
-        new_data_to_process = []
-        new_data_for_db = []
-        try:
-            with sqlite3.connect(db_name) as conn:
-                existing_timestamps = get_existing_timestamps(conn.cursor())
-            
-            for data_string in message:
-                try:
-                    timestamp = data_string.split('/')[0]
-                    if timestamp not in existing_timestamps:
-                        new_data_to_process.append(data_string)
-                        sql_data = data_string.split('/')
-                        new_data_for_db.append((sql_data[0], location, int(sql_data[1]), int(sql_data[2]), int(sql_data[3])))
-                except: continue
+    if client and client.is_connected(): 
+        if message and message != message_check:
+            print(f"\n偵測到新訊息 (包含 {len(message)} 筆數據)，開始處理...")
+            new_data_to_process = []
+            new_data_for_db = []
+            try:
+                with sqlite3.connect(db_name) as conn:
+                    existing_timestamps = get_existing_timestamps(conn.cursor())
+                
+                for data_string in message:
+                    try:
+                        timestamp = data_string.split('/')[0]
+                        if timestamp not in existing_timestamps:
+                            new_data_to_process.append(data_string)
+                            sql_data = data_string.split('/')
+                            new_data_for_db.append((sql_data[0], location, int(sql_data[1]), int(sql_data[2]), int(sql_data[3])))
+                    except: continue
 
-            if new_data_to_process:
-                print(f"去重後，有 {len(new_data_to_process)} 筆全新數據需要處理。")
-                insert_database_batch(new_data_for_db)
-                upload_successful = power_read_and_send(new_data_to_process, client, location)
-                if upload_successful:
-                    print("Blynk 上傳成功，已發送 ACK。")
+                if new_data_to_process:
+                    print(f"去重後，有 {len(new_data_to_process)} 筆全新數據需要處理。")
+                    insert_database_batch(new_data_for_db)
+                    upload_successful = power_read_and_send(new_data_to_process, client, location) 
+                    if upload_successful:
+                        print("Blynk 上傳成功，已發送 ACK。")
+                        message_check = list(message)
+                        client.publish(topic_ack, "OK")
+                    else:
+                        print("Blynk 上傳失敗，未發送 ACK，數據將在下一輪重試。")
+                else:
+                    print("收到的均為重複數據，直接發送 ACK 以協助 Pico 清除暫存。")
                     message_check = list(message)
                     client.publish(topic_ack, "OK")
-                else:
-                    print("Blynk 上傳失敗，未發送 ACK，數據將在下一輪重試。")
-            else:
-                print("收到的均為重複數據，直接發送 ACK 以協助 Pico 清除暫存。")
-                message_check = list(message)
-                client.publish(topic_ack, "OK")
-            
-            client.publish(topic_pub, f"{pizero2_on}_{pizero2_off}")
+                
+                client.publish(topic_pub, f"{pizero2_on}_{pizero2_off}")
 
-        except Exception as e:
-            print(f"數據處理主流程發生嚴重錯誤: {e}")
+            except Exception as e:
+                print(f"數據處理主流程發生嚴重錯誤: {e}")
+        else:
+            if message == message_check:
+                print("無新數據。")
     else:
-        if message == message_check:
-            print("無新數據。")
-            
-    client.loop_stop()
+        print("MQTT 客戶端未連線，跳過數據處理。")
+
     time.sleep(5)
+
+
